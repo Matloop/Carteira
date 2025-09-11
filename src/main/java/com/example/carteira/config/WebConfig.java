@@ -14,7 +14,7 @@ public class WebConfig {
             @Override
             public void addCorsMappings(CorsRegistry registry) {
                 registry.addMapping("/api/**") // Aplica a configuração a todos os endpoints que começam com /api
-                        .allowedOrigins("http://localhost:3000") // Permite requisições SOMENTE desta origem
+                        .allowedOrigins("http://localhost:3000", "http://localhost:4321") // Permite requisições SOMENTE desta origem
                         .allowedMethods("GET", "POST", "PUT", "DELETE", "OPTIONS") // Métodos HTTP permitidos
                         .allowedHeaders("*") // Permite todos os cabeçalhos na requisição
                         .allowCredentials(true); // Permite o envio de cookies (importante para autenticação futura)

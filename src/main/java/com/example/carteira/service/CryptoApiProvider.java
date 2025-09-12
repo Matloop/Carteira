@@ -12,6 +12,8 @@ import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
 import com.example.carteira.model.dtos.CoinGeckoCoin;
 import java.math.BigDecimal;
+import java.time.LocalDate;
+import java.time.format.DateTimeFormatter;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -42,6 +44,38 @@ public class CryptoApiProvider implements MarketDataProvider {
     @Override
     public Mono<Void> initialize() {
         return populateCryptoIdCache();
+    }
+
+    @Override
+    public Mono<PriceData> fetchHistoricalPrice(AssetToFetch asset, LocalDate date) {
+        String coinGeckoId = mapTickerToCoingeckoId(asset.ticker());
+        if(coinGeckoId == null) {
+            return Mono.empty();
+        }
+        String dateString = date.format(DateTimeFormatter.ofPattern("dd-MM-yyyy"));
+
+        return coingeckoWebClient.get()
+                .uri(uriBuilder -> uriBuilder
+                        .path("/coins/" + coinGeckoId + "/history")
+                        .queryParam("date", dateString)
+                        .build())
+                .retrieve()
+                .bodyToMono(JsonNode.class)
+                .map(response -> {
+                    // A resposta da API tem uma estrutura aninhada
+                    JsonNode marketData = response.path("market_data");
+                    if (!marketData.isMissingNode() && marketData.has("current_price") && marketData.path("current_price").has("brl")) {
+                        BigDecimal price = new BigDecimal(marketData.path("current_price").path("brl").asText());
+                        return new PriceData(asset.ticker(), price);
+                    }
+                    return null; // Será filtrado
+                })
+                .filter(Objects::nonNull)
+                .onErrorResume(e -> {
+                    logger.error("Erro ao buscar preço histórico para {} em {}: {}", asset.ticker(), date, e.getMessage());
+                    return Mono.empty();
+                });
+
     }
 
     // 5. O método fetch agora retorna um FLUXO de dados

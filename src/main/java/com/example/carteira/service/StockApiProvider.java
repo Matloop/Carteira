@@ -16,6 +16,7 @@ import reactor.core.publisher.Mono;
 import java.math.BigDecimal;
 import java.math.RoundingMode;
 import java.time.Duration;
+import java.time.LocalDate;
 import java.util.List;
 import java.util.Objects;
 
@@ -57,6 +58,11 @@ public class StockApiProvider implements MarketDataProvider {
                     }
                 })
                 .then();
+    }
+
+    @Override
+    public Mono<PriceData> fetchHistoricalPrice(AssetToFetch asset, LocalDate date) {
+        return null;
     }
 
     // BUG 3 CORRIGIDO: Implementação correta e reativa do fetchPrices.

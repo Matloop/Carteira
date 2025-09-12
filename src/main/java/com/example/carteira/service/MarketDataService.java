@@ -130,7 +130,7 @@ public class MarketDataService {
      * @param assetType O tipo de ativo (STOCK, CRYPTO, etc.).
      * @return um Optional contendo o provedor, ou um Optional vazio se nenhum for encontrado.
      */
-    private List<MarketDataProvider> findProvidersFor(AssetType assetType) {
+    List<MarketDataProvider> findProvidersFor(AssetType assetType) {
         return providers.stream()
                 .filter(p -> p.supports(assetType))
                 // Ordena a lista para que o provedor @Primary venha primeiro.

@@ -1,3 +1,4 @@
+// Em service/PortfolioService.java
 package com.example.carteira.service;
 
 import com.example.carteira.model.Transaction;
@@ -11,11 +12,10 @@ import org.springframework.stereotype.Service;
 import java.math.BigDecimal;
 import java.math.RoundingMode;
 import java.time.LocalDate;
+import java.time.format.DateTimeFormatter;
 import java.util.*;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
-
-import static com.example.carteira.model.enums.Market.US;
 
 @Service
 public class PortfolioService {
@@ -32,64 +32,65 @@ public class PortfolioService {
         this.fixedIncomeService = fixedIncomeService;
     }
 
-    private AssetPositionDto consolidateTicker(String ticker) {
-        List<Transaction> transactions = transactionRepository.findByTickerOrderByTransactionDateAsc(ticker);
-        if (transactions.isEmpty()) {
-            return null;
+    /**
+     * Ponto de entrada principal para o dashboard. Orquestra a busca e a montagem de todos os dados.
+     */
+    public PortfolioDashboardDto getPortfolioDashboardData() {
+        // 1. Obtém a lista consolidada de todas as posições de ativos com seus valores atuais.
+        List<AssetPositionDto> allAssets = getConsolidatedPortfolio();
+
+        // 2. Calcula os dados do resumo (patrimônio total, etc.).
+        BigDecimal totalHeritage = allAssets.stream()
+                .map(AssetPositionDto::getCurrentValue)
+                .reduce(BigDecimal.ZERO, BigDecimal::add);
+
+        BigDecimal totalInvested = allAssets.stream()
+                .map(AssetPositionDto::getTotalInvested)
+                .reduce(BigDecimal.ZERO, BigDecimal::add);
+
+        BigDecimal profitability = BigDecimal.ZERO;
+        if (totalInvested.compareTo(BigDecimal.ZERO) > 0) {
+            profitability = totalHeritage.subtract(totalInvested)
+                    .divide(totalInvested, 4, RoundingMode.HALF_UP)
+                    .multiply(BigDecimal.valueOf(100));
         }
+        PortfolioSummaryDto summary = new PortfolioSummaryDto(totalHeritage, totalInvested, profitability);
 
-        BigDecimal totalQuantity = BigDecimal.ZERO;
-        BigDecimal totalCost = BigDecimal.ZERO;
-        BigDecimal totalBuyQuantity = BigDecimal.ZERO;
-        Market market = US;// Precisamos da quantidade total comprada para o preço médio
+        // 3. Calcula a árvore de porcentagens para o gráfico de pizza.
+        Map<String, AllocationNodeDto> percentages = buildAllocationTree(allAssets, totalHeritage);
 
-        for (Transaction t : transactions) {
-            if (t.getTransactionType() == TransactionType.BUY) {
-                BigDecimal costOfThisTransaction = t.getQuantity().multiply(t.getPricePerUnit());
-                totalCost = totalCost.add(costOfThisTransaction);
-                totalQuantity = totalQuantity.add(t.getQuantity());
-                totalBuyQuantity = totalBuyQuantity.add(t.getQuantity());
-                market = t.getMarket();
-            } else { // Venda (SELL)
-                totalQuantity = totalQuantity.subtract(t.getQuantity());
-            }
-        }
+        // 4. Constrói a estrutura hierárquica de ativos para a lista "Meus Ativos".
+        Map<String, List<AssetSubCategoryDto>> assetsGrouped = buildAssetHierarchy(allAssets, totalHeritage);
 
-        if (totalQuantity.compareTo(BigDecimal.ZERO) <= 0) {
-            return null;
-        }
-
-        BigDecimal averagePrice = totalBuyQuantity.compareTo(BigDecimal.ZERO) == 0 ?
-                BigDecimal.ZERO :
-                totalCost.divide(totalBuyQuantity, 4, RoundingMode.HALF_UP);
-
-        BigDecimal currentPrice = marketDataService.getPrice(ticker);
-        BigDecimal currentValue = currentPrice.multiply(totalQuantity);
-
-        // O custo total para o cálculo de lucro deve refletir a posição atual
-        BigDecimal currentPositionCost = totalQuantity.multiply(averagePrice);
-        BigDecimal profitOrLoss = currentValue.subtract(currentPositionCost);
-
-        BigDecimal profitability = currentPositionCost.compareTo(BigDecimal.ZERO) == 0 ?
-                BigDecimal.ZERO :
-                profitOrLoss.divide(currentPositionCost, 4, RoundingMode.HALF_UP).multiply(BigDecimal.valueOf(100));
-
-        AssetPositionDto position = new AssetPositionDto();
-        position.setTicker(ticker);
-        position.setAssetType(transactions.get(0).getAssetType());
-        position.setTotalQuantity(totalQuantity);
-        position.setAveragePrice(averagePrice);
-        position.setMarket(market);
-        position.setTotalInvested(currentPositionCost.setScale(2, RoundingMode.HALF_UP));
-        position.setCurrentValue(currentValue.setScale(2, RoundingMode.HALF_UP));
-        position.setProfitOrLoss(profitOrLoss.setScale(2, RoundingMode.HALF_UP));
-        position.setProfitability(profitability.setScale(2, RoundingMode.HALF_UP));
-
-        return position;
+        // 5. Retorna o DTO completo com todas as seções.
+        return new PortfolioDashboardDto(summary, percentages, assetsGrouped);
     }
 
-    private AssetPositionDto calculateAssetPosition(AssetKey key, List<Transaction> transactions) {
-        // A lógica de cálculo de preço médio, etc., é a mesma de antes.
+    /**
+     * Consolida todas as transações e posições de renda fixa em uma única lista de posições de ativos.
+     */
+    private List<AssetPositionDto> getConsolidatedPortfolio() {
+        // Agrupa transações de ativos variáveis (Ações, ETFs, Cripto)
+        Map<AssetKey, List<Transaction>> groupedTransactions = transactionRepository.findAll().stream()
+                .filter(t -> t.getTicker() != null)
+                .collect(Collectors.groupingBy(t -> new AssetKey(t.getTicker(), t.getAssetType(), t.getMarket())));
+
+        // Calcula a posição atual para cada ativo variável
+        Stream<AssetPositionDto> transactionalAssetsStream = groupedTransactions.entrySet().stream()
+                .map(entry -> calculateCurrentPosition(entry.getKey(), entry.getValue()))
+                .filter(Objects::nonNull);
+
+        // Obtém a posição atual dos ativos de renda fixa
+        Stream<AssetPositionDto> fixedIncomeAssetsStream = fixedIncomeService.getAllFixedIncomePositions().stream();
+
+        // Une os dois tipos de ativos em uma lista final
+        return Stream.concat(transactionalAssetsStream, fixedIncomeAssetsStream).collect(Collectors.toList());
+    }
+
+    /**
+     * Calcula a posição atual de um único ativo (não Renda Fixa) a partir de suas transações.
+     */
+    private AssetPositionDto calculateCurrentPosition(AssetKey key, List<Transaction> transactions) {
         BigDecimal totalQuantity = BigDecimal.ZERO;
         BigDecimal totalCost = BigDecimal.ZERO;
         BigDecimal totalBuyQuantity = BigDecimal.ZERO;
@@ -104,11 +105,7 @@ public class PortfolioService {
             }
         }
 
-        if (totalQuantity.compareTo(BigDecimal.ZERO) <= 0) {
-            return null; // A posição foi zerada.
-        }
-
-
+        if (totalQuantity.compareTo(BigDecimal.ZERO) <= 0) return null;
 
         BigDecimal averagePrice = totalCost.divide(totalBuyQuantity, 4, RoundingMode.HALF_UP);
         BigDecimal currentPrice = marketDataService.getPrice(key.ticker());
@@ -119,96 +116,218 @@ public class PortfolioService {
                 profitOrLoss.divide(currentPositionCost, 4, RoundingMode.HALF_UP).multiply(BigDecimal.valueOf(100)) :
                 BigDecimal.ZERO;
 
-        // CRIAÇÃO CORRETA DO DTO, AGORA COM TODOS OS DADOS
         AssetPositionDto position = new AssetPositionDto();
         position.setTicker(key.ticker());
-        position.setAssetType(key.assetType()); // Usa o tipo da chave
-        position.setMarket(key.market());       // USA O MERCADO DA CHAVE (CORREÇÃO CRÍTICA)
+        position.setAssetType(key.assetType());
+        position.setMarket(key.market());
         position.setTotalQuantity(totalQuantity);
-        position.setAveragePrice(averagePrice.setScale(2, RoundingMode.HALF_UP));
-        position.setCurrentPrice(currentPrice.setScale(2, RoundingMode.HALF_UP));
-        position.setTotalInvested(currentPositionCost.setScale(2, RoundingMode.HALF_UP));
-        position.setCurrentValue(currentValue.setScale(2, RoundingMode.HALF_UP));
-        position.setProfitOrLoss(profitOrLoss.setScale(2, RoundingMode.HALF_UP));
-        position.setProfitability(profitability.setScale(2, RoundingMode.HALF_UP));
-
+        position.setAveragePrice(averagePrice);
+        position.setCurrentPrice(currentPrice);
+        position.setTotalInvested(currentPositionCost);
+        position.setCurrentValue(currentValue);
+        position.setProfitOrLoss(profitOrLoss);
+        position.setProfitability(profitability);
         return position;
     }
 
-    public Map<String, List<AssetSubCategoryDto>> getAssetHierarchy() {
-        // 1. Consolida todos os ativos em uma lista plana. (Sua lógica existente)
-        List<Transaction> allTransactions = transactionRepository.findAll();
-        Map<AssetKey, List<Transaction>> groupedTransactions = allTransactions.stream()
-                .filter(t -> t.getTicker() != null)
-                .collect(Collectors.groupingBy(t -> new AssetKey(t.getTicker(), t.getAssetType(), t.getMarket())));
+    // --- MÉTODOS DE AGRUPAMENTO PARA A UI ---
 
-        Stream<AssetPositionDto> transactionalAssetsStream = groupedTransactions.entrySet().stream()
-                .map(entry -> calculateAssetPosition(entry.getKey(), entry.getValue()))
-                .filter(Objects::nonNull);
-
-        Stream<AssetPositionDto> fixedIncomeAssetsStream = fixedIncomeService.getAllFixedIncomePositions().stream();
-
-        List<AssetPositionDto> allAssets = Stream.concat(transactionalAssetsStream, fixedIncomeAssetsStream)
-                .collect(Collectors.toList());
-
-        // 2. Calcula o patrimônio total a partir da lista consolidada.
-        BigDecimal totalHeritage = allAssets.stream()
-                .map(AssetPositionDto::getCurrentValue)
-                .reduce(BigDecimal.ZERO, BigDecimal::add);
-
-        // 3. Agrupa e transforma em uma única e eficiente operação de stream.
-        return allAssets.stream()
+    private Map<String, List<AssetSubCategoryDto>> buildAssetHierarchy(List<AssetPositionDto> allAssets, BigDecimal totalHeritage) {
+        Map<String, Map<String, List<AssetPositionDto>>> groupedMap = allAssets.stream()
                 .collect(Collectors.groupingBy(
-                        // Nível 1: Classificador de Categoria Principal (as "abas")
                         asset -> {
                             if (asset.getAssetType() == AssetType.CRYPTO) return "Cripto";
                             if (asset.getMarket() == Market.US) return "EUA";
                             return "Brasil";
                         },
-                        // Nível 2: Coletor aninhado que agrupa e DEPOIS transforma
-                        Collectors.collectingAndThen(
-                                // Agrupa por tipo de ativo (as "sanfonas")
-                                Collectors.groupingBy(asset -> getFriendlyAssetTypeName(asset.getAssetType())),
-                                // E ENTÃO, pega o mapa resultante e o transforma em uma List<AssetSubCategoryDto>
-                                subCategoryMap -> subCategoryMap.entrySet().stream()
-                                        .map(entry -> {
-                                            String subCategoryName = entry.getKey();
-                                            List<AssetPositionDto> assetsInSubCategory = entry.getValue();
-
-                                            BigDecimal subCategoryTotalValue = assetsInSubCategory.stream()
-                                                    .map(AssetPositionDto::getCurrentValue)
-                                                    .reduce(BigDecimal.ZERO, BigDecimal::add);
-
-                                            // TRANSFORMAÇÃO FINAL: AssetPositionDto -> AssetTableRowDto
-                                            List<AssetTableRowDto> assetTableRows = assetsInSubCategory.stream()
-                                                    .map(asset -> {
-                                                        BigDecimal portfolioPercentage = BigDecimal.ZERO;
-                                                        if (totalHeritage.compareTo(BigDecimal.ZERO) > 0) {
-                                                            portfolioPercentage = asset.getCurrentValue()
-                                                                    .divide(totalHeritage, 4, RoundingMode.HALF_UP)
-                                                                    .multiply(BigDecimal.valueOf(100));
-                                                        }
-                                                        return new AssetTableRowDto(
-                                                                asset.getTicker(), asset.getName(), asset.getTotalQuantity(),
-                                                                asset.getAveragePrice(), asset.getCurrentPrice(),
-                                                                asset.getCurrentValue(), asset.getProfitability(),
-                                                                portfolioPercentage.setScale(2, RoundingMode.HALF_UP) // Formata aqui
-                                                        );
-                                                    })
-                                                    // Opcional: Ordena os ativos dentro da subcategoria pelo maior valor
-                                                    .sorted(Comparator.comparing(AssetTableRowDto::getCurrentValue).reversed())
-                                                    .collect(Collectors.toList());
-
-                                            return new AssetSubCategoryDto(subCategoryName, subCategoryTotalValue, assetTableRows);
-                                        })
-                                        // Opcional: Ordena as subcategorias pelo maior valor total
-                                        .sorted(Comparator.comparing(AssetSubCategoryDto::getTotalValue).reversed())
-                                        .collect(Collectors.toList())
-                        )
+                        Collectors.groupingBy(asset -> getFriendlyAssetTypeName(asset.getAssetType()))
                 ));
+
+        Map<String, List<AssetSubCategoryDto>> finalResult = new HashMap<>();
+        groupedMap.forEach((categoryName, subCategoryMap) -> {
+            List<AssetSubCategoryDto> subCategoryList = subCategoryMap.entrySet().stream()
+                    .map(entry -> {
+                        String subCategoryName = entry.getKey();
+                        List<AssetPositionDto> assetsInSubCategory = entry.getValue();
+                        BigDecimal totalValue = assetsInSubCategory.stream().map(AssetPositionDto::getCurrentValue).reduce(BigDecimal.ZERO, BigDecimal::add);
+                        List<AssetTableRowDto> assetTableRows = assetsInSubCategory.stream()
+                                .map(asset -> {
+                                    BigDecimal portfolioPercentage = totalHeritage.compareTo(BigDecimal.ZERO) > 0 ?
+                                            asset.getCurrentValue().divide(totalHeritage, 4, RoundingMode.HALF_UP).multiply(BigDecimal.valueOf(100)) :
+                                            BigDecimal.ZERO;
+                                    return new AssetTableRowDto(
+                                            asset.getTicker(), asset.getName(), asset.getTotalQuantity(), asset.getAveragePrice(),
+                                            asset.getCurrentPrice(), asset.getCurrentValue(), asset.getProfitability(),
+                                            portfolioPercentage
+                                    );
+                                })
+                                .sorted(Comparator.comparing(AssetTableRowDto::getCurrentValue).reversed())
+                                .collect(Collectors.toList());
+                        return new AssetSubCategoryDto(subCategoryName, totalValue, assetTableRows);
+                    })
+                    .sorted(Comparator.comparing(AssetSubCategoryDto::getTotalValue).reversed())
+                    .collect(Collectors.toList());
+            finalResult.put(categoryName, subCategoryList);
+        });
+        return finalResult;
     }
 
-    private String getFriendlyAssetTypeName(AssetType assetType) {
+    private Map<String, AllocationNodeDto> buildAllocationTree(List<AssetPositionDto> allAssets, BigDecimal totalHeritage) {
+        if (totalHeritage.compareTo(BigDecimal.ZERO) <= 0) return Map.of();
+
+        Map<String, List<AssetPositionDto>> byCategory = allAssets.stream()
+                .collect(Collectors.groupingBy(asset -> {
+                    if (asset.getAssetType() == AssetType.CRYPTO) return "crypto";
+                    if (asset.getMarket() == Market.US) return "usa";
+                    return "brazil";
+                }));
+
+        return byCategory.entrySet().stream().collect(Collectors.toMap(
+                Map.Entry::getKey,
+                entry -> {
+                    BigDecimal categoryTotal = entry.getValue().stream().map(AssetPositionDto::getCurrentValue).reduce(BigDecimal.ZERO, BigDecimal::add);
+                    BigDecimal categoryPercentage = categoryTotal.divide(totalHeritage, 4, RoundingMode.HALF_UP).multiply(BigDecimal.valueOf(100));
+                    Map<String, AllocationNodeDto> children = buildChildrenForCategory(entry.getKey(), entry.getValue(), categoryTotal);
+                    return new AllocationNodeDto(categoryPercentage, children);
+                }
+        ));
+    }
+
+    private Map<String, AllocationNodeDto> buildChildrenForCategory(String category, List<AssetPositionDto> assets, BigDecimal categoryTotal) {
+        if ("crypto".equals(category)) {
+            return assets.stream().collect(Collectors.toMap(
+                    AssetPositionDto::getTicker,
+                    asset -> new AllocationNodeDto(asset.getCurrentValue().divide(categoryTotal, 4, RoundingMode.HALF_UP).multiply(BigDecimal.valueOf(100)))
+            ));
+        }
+
+        Map<String, List<AssetPositionDto>> byAssetType = assets.stream().collect(Collectors.groupingBy(asset -> asset.getAssetType().name().toLowerCase()));
+        return byAssetType.entrySet().stream().collect(Collectors.toMap(
+                Map.Entry::getKey,
+                entry -> {
+                    BigDecimal assetTypeTotal = entry.getValue().stream().map(AssetPositionDto::getCurrentValue).reduce(BigDecimal.ZERO, BigDecimal::add);
+                    BigDecimal assetTypePercentage = assetTypeTotal.divide(categoryTotal, 4, RoundingMode.HALF_UP).multiply(BigDecimal.valueOf(100));
+                    Map<String, AllocationNodeDto> grandchildren = entry.getValue().stream().collect(Collectors.toMap(
+                            AssetPositionDto::getTicker,
+                            asset -> new AllocationNodeDto(asset.getCurrentValue().divide(assetTypeTotal, 4, RoundingMode.HALF_UP).multiply(BigDecimal.valueOf(100)))
+                    ));
+                    return new AllocationNodeDto(assetTypePercentage, grandchildren);
+                }
+        ));
+    }
+
+    public PortfolioEvolutionDto getPortfolioEvolutionData() {
+        List<LocalDate> dates = new ArrayList<>();
+        LocalDate today = LocalDate.now();
+        for (int i = 0; i < 12; i++) {
+            dates.add(today.minusMonths(i).withDayOfMonth(1));
+        }
+        Collections.reverse(dates); // Ordena do mais antigo para o mais recente
+        dates.add(today);
+
+        List<Transaction> allTransactions = transactionRepository.findAll();
+
+        // 3. Itera sobre cada data e calcula o estado da carteira naquele ponto no tempo
+        List<PortfolioEvolutionPointDto> evolutionPoints = dates.stream().map(date -> {
+            // Filtra transações que ocorreram ATÉ a data do snapshot
+            List<Transaction> transactionsUpToDate = allTransactions.stream()
+                    .filter(t -> !t.getTransactionDate().isAfter(date))
+                    .collect(Collectors.toList());
+
+            List<AssetPositionDto> historicalPositions = getHistoricalPortfolio(transactionsUpToDate, date);
+
+            BigDecimal patrimonio = historicalPositions.stream()
+                    .map(AssetPositionDto::getCurrentValue)
+                    .reduce(BigDecimal.ZERO, BigDecimal::add);
+
+            BigDecimal valorAplicado = historicalPositions.stream()
+                    .map(AssetPositionDto::getTotalInvested)
+                    .reduce(BigDecimal.ZERO, BigDecimal::add);
+
+            return new PortfolioEvolutionPointDto(
+                    date.format(DateTimeFormatter.ofPattern("MM/yy")), // Formato "09/25"
+                    patrimonio,
+                    valorAplicado
+            );
+        }).collect(Collectors.toList());
+
+        return new PortfolioEvolutionDto(evolutionPoints);
+    }
+
+    private List<AssetPositionDto> getHistoricalPortfolio(List<Transaction> transactions, LocalDate calculationDate) {
+        Map<AssetKey, List<Transaction>> groupedTransactions = transactions.stream()
+                .filter(t -> t.getTicker() != null)
+                .collect(Collectors.groupingBy(t -> new AssetKey(t.getTicker(), t.getAssetType(), t.getMarket())));
+
+        // Usa parallelStream para acelerar a busca de múltiplos preços históricos
+        Stream<AssetPositionDto> transactionalAssetsStream = groupedTransactions.entrySet().parallelStream()
+                .map(entry -> calculateHistoricalPosition(entry.getKey(), entry.getValue(), calculationDate))
+                .filter(Objects::nonNull);
+
+        // TODO: Implementar a busca histórica para renda fixa
+        // Stream<AssetPositionDto> fixedIncomeAssetsStream = fixedIncomeService.getAllFixedIncomePositionsForDate(calculationDate).stream();
+        // return Stream.concat(transactionalAssetsStream, fixedIncomeAssetsStream).collect(Collectors.toList());
+
+        return transactionalAssetsStream.collect(Collectors.toList());
+    }
+
+    private AssetPositionDto calculateHistoricalPosition(AssetKey key, List<Transaction> transactions, LocalDate calculationDate) {
+        // 1. Calcula quantidade e custo médio (lógica idêntica ao cálculo atual)
+        BigDecimal totalQuantity = BigDecimal.ZERO;
+        BigDecimal totalCost = BigDecimal.ZERO;
+        BigDecimal totalBuyQuantity = BigDecimal.ZERO;
+
+        for (Transaction t : transactions) {
+            if (t.getTransactionType() == TransactionType.BUY) {
+                totalCost = totalCost.add(t.getQuantity().multiply(t.getPricePerUnit()));
+                totalQuantity = totalQuantity.add(t.getQuantity());
+                totalBuyQuantity = totalBuyQuantity.add(t.getQuantity());
+            } else {
+                totalQuantity = totalQuantity.subtract(t.getQuantity());
+            }
+        }
+        if (totalQuantity.compareTo(BigDecimal.ZERO) <= 0) return null;
+        BigDecimal averagePrice = totalCost.divide(totalBuyQuantity, 4, RoundingMode.HALF_UP);
+
+        List<MarketDataProvider> providers = marketDataService.findProvidersFor(key.assetType());
+        if (providers.isEmpty()) {
+            return null;
+        }
+        MarketDataProvider provider = providers.get(0);
+
+        // .block() é usado aqui pois estamos em um stream paralelo.
+        PriceData historicalPriceData = provider
+                .fetchHistoricalPrice(new AssetToFetch(key.ticker(), key.market()), calculationDate)
+                .block();
+
+        if (historicalPriceData == null) {
+            return null; // Não podemos calcular a posição sem o preço
+        }
+
+        // 3. Monta o DTO com os dados históricos
+        BigDecimal historicalPrice = historicalPriceData.price();
+        BigDecimal currentValue = historicalPrice.multiply(totalQuantity);
+        BigDecimal currentPositionCost = totalQuantity.multiply(averagePrice);
+        BigDecimal profitOrLoss = currentValue.subtract(currentPositionCost);
+        BigDecimal profitability = currentPositionCost.compareTo(BigDecimal.ZERO) > 0 ?
+                profitOrLoss.divide(currentPositionCost, 4, RoundingMode.HALF_UP).multiply(BigDecimal.valueOf(100)) :
+                BigDecimal.ZERO;
+
+        AssetPositionDto position = new AssetPositionDto();
+        position.setTicker(key.ticker());
+        position.setAssetType(key.assetType());
+        position.setMarket(key.market());
+        position.setTotalQuantity(totalQuantity);
+        position.setAveragePrice(averagePrice);
+        position.setCurrentPrice(historicalPrice); // O "preço atual" neste contexto é o preço histórico
+        position.setTotalInvested(currentPositionCost);
+        position.setCurrentValue(currentValue);
+        position.setProfitOrLoss(profitOrLoss);
+        position.setProfitability(profitability);
+        return position;
+    }
+
+        private String getFriendlyAssetTypeName(AssetType assetType) {
         return switch (assetType) {
             case STOCK -> "Ações";
             case ETF -> "ETFs";
@@ -218,239 +337,5 @@ public class PortfolioService {
         };
     }
 
-    private String getAssetCategoryKeyForPercentages(AssetPositionDto asset) {
-        String market = (asset.getMarket() != null) ? asset.getMarket().name() : asset.getAssetType().name();
-        return asset.getAssetType().name() + "_" + market;
-    }
-
-    private Map<String, BigDecimal> calculatePercentages(List<AssetPositionDto> allAssets, BigDecimal totalHeritage) {
-        if (totalHeritage.compareTo(BigDecimal.ZERO) <= 0) {
-            return Map.of();
-        }
-
-        Map<String, BigDecimal> totalsByCategory = allAssets.stream()
-                .collect(Collectors.groupingBy(
-                        this::getAssetCategoryKeyForPercentages,
-                        Collectors.reducing(BigDecimal.ZERO, AssetPositionDto::getCurrentValue, BigDecimal::add)
-                ));
-
-        return totalsByCategory.entrySet().stream()
-                .collect(Collectors.toMap(
-                        Map.Entry::getKey,
-                        entry -> entry.getValue()
-                                .divide(totalHeritage, 4, RoundingMode.HALF_UP)
-                                .multiply(BigDecimal.valueOf(100))
-                ));
-    }
-
-    public PortfolioDashboardDto getPortfolioDashboardData() {
-        // 1. CALCULA A LISTA COMPLETA DE POSIÇÕES DE FORMA EFICIENTE
-        List<AssetPositionDto> allAssets = getConsolidatedPortfolio();
-
-
-        // --- Lógica do Resumo (Summary) ---
-        BigDecimal totalHeritage = allAssets.stream().map(AssetPositionDto::getCurrentValue).reduce(BigDecimal.ZERO, BigDecimal::add);
-        BigDecimal totalInvested = allAssets.stream().map(AssetPositionDto::getTotalInvested).reduce(BigDecimal.ZERO, BigDecimal::add);
-        BigDecimal profitability = BigDecimal.ZERO;
-        if (totalInvested.compareTo(BigDecimal.ZERO) > 0) {
-            profitability = (totalHeritage.subtract(totalInvested)).divide(totalInvested, 4, RoundingMode.HALF_UP).multiply(BigDecimal.valueOf(100));
-        }
-        PortfolioSummaryDto summary = new PortfolioSummaryDto(totalHeritage, totalInvested, profitability);
-        //faz a montagem das porcentagens
-        Map<String, AllocationNodeDto> percentages = buildAllocationTree(allAssets, totalHeritage);
-
-        Map<String, List<AssetSubCategoryDto>> assetsGrouped = buildAssetHierarchy(allAssets,totalHeritage);
-
-        return new PortfolioDashboardDto(summary, percentages, assetsGrouped);
-    }
-
-    private List<AssetPositionDto> getConsolidatedPortfolio() {
-        List<Transaction> allTransactions = transactionRepository.findAll();
-        Map<AssetKey, List<Transaction>> groupedTransactions = allTransactions.stream()
-                .filter(t -> t.getTicker() != null)
-                .collect(Collectors.groupingBy(t -> new AssetKey(t.getTicker(), t.getAssetType(), t.getMarket())));
-
-        Stream<AssetPositionDto> transactionalAssetsStream = groupedTransactions.entrySet().stream()
-                .map(entry -> calculateAssetPosition(entry.getKey(), entry.getValue()))
-                .filter(Objects::nonNull);
-
-        Stream<AssetPositionDto> fixedIncomeAssetsStream = fixedIncomeService.getAllFixedIncomePositions().stream();
-
-        return Stream.concat(transactionalAssetsStream, fixedIncomeAssetsStream).collect(Collectors.toList());
-    }
-
-    private Map<String, List<AssetSubCategoryDto>> buildAssetHierarchy(List<AssetPositionDto> allAssets, BigDecimal totalHeritage) {
-        // Passo 1: Agrupamento em dois níveis (Categoria Principal -> Tipo de Ativo -> Lista de Ativos)
-        Map<String, Map<String, List<AssetPositionDto>>> groupedMap = allAssets.stream()
-                .collect(Collectors.groupingBy(
-                        // Classificador de Nível 1 (Chaves: "Brasil", "EUA", "Cripto")
-                        asset -> {
-                            if (asset.getAssetType() == AssetType.CRYPTO) return "Cripto";
-                            if (asset.getMarket() == Market.US) return "EUA";
-                            return "Brasil";
-                        },
-                        // Coletor de Nível 2: Agrupa novamente por tipo de ativo
-                        Collectors.groupingBy(
-                                asset -> getFriendlyAssetTypeName(asset.getAssetType())
-                        )
-                ));
-
-        // Passo 2: Transformar o mapa agrupado na estrutura de DTOs final
-        Map<String, List<AssetSubCategoryDto>> finalResult = new HashMap<>();
-        groupedMap.forEach((categoryName, subCategoryMap) -> {
-            List<AssetSubCategoryDto> subCategoryList = subCategoryMap.entrySet().stream()
-                    .map(entry -> {
-                        String subCategoryName = entry.getKey();
-                        List<AssetPositionDto> assetsInSubCategory = entry.getValue();
-
-                        BigDecimal totalValue = assetsInSubCategory.stream()
-                                .map(AssetPositionDto::getCurrentValue)
-                                .reduce(BigDecimal.ZERO, BigDecimal::add);
-
-                        List<AssetTableRowDto> assetTableRows = assetsInSubCategory.stream()
-                                .map(asset -> {
-                                    BigDecimal portfolioPercentage = BigDecimal.ZERO;
-                                    if (totalHeritage.compareTo(BigDecimal.ZERO) > 0) {
-                                        portfolioPercentage = asset.getCurrentValue()
-                                                .divide(totalHeritage, 4, RoundingMode.HALF_UP)
-                                                .multiply(BigDecimal.valueOf(100));
-                                    }
-
-                                    return new AssetTableRowDto(
-                                            asset.getTicker(),
-                                            asset.getName(),
-                                            asset.getTotalQuantity(),
-                                            asset.getAveragePrice(),
-                                            asset.getCurrentPrice(),
-                                            asset.getCurrentValue(),
-                                            asset.getProfitability(),
-                                            portfolioPercentage
-
-                                    );
-                                }).collect(Collectors.toList());
-
-                        return new AssetSubCategoryDto(subCategoryName, totalValue, assetTableRows);
-                    })
-                    .collect(Collectors.toList());
-
-            finalResult.put(categoryName, subCategoryList);
-        });
-
-        return finalResult;
-    }
-
-    private Map<String, AllocationNodeDto> buildAllocationTree(List<AssetPositionDto> allAssets, BigDecimal totalHeritage) {
-        if (totalHeritage.compareTo(BigDecimal.ZERO) <= 0) {
-            return Map.of();
-        }
-
-        // NÍVEL 1: Agrupar por Categoria Principal (Brazil, USA, Crypto)
-        Map<String, List<AssetPositionDto>> byCategory = allAssets.stream()
-                .collect(Collectors.groupingBy(asset -> {
-                    if (asset.getAssetType() == AssetType.CRYPTO) return "crypto";
-                    if (asset.getMarket() == Market.US) return "usa";
-                    return "brazil"; // B3 e Renda Fixa caem aqui
-                }));
-
-        // Construir a árvore final
-        return byCategory.entrySet().stream()
-                .collect(Collectors.toMap(
-                        Map.Entry::getKey,
-                        entry -> {
-                            String categoryKey = entry.getKey();
-                            List<AssetPositionDto> categoryAssets = entry.getValue();
-
-                            BigDecimal categoryTotal = categoryAssets.stream()
-                                    .map(AssetPositionDto::getCurrentValue)
-                                    .reduce(BigDecimal.ZERO, BigDecimal::add);
-
-                            BigDecimal categoryPercentage = categoryTotal.divide(totalHeritage, 4, RoundingMode.HALF_UP).multiply(BigDecimal.valueOf(100));
-
-                            // NÍVEL 2: Construir os filhos de cada categoria
-                            Map<String, AllocationNodeDto> children = buildChildrenForCategory(categoryKey, categoryAssets, categoryTotal);
-
-                            return new AllocationNodeDto(categoryPercentage, children);
-                        }
-                ));
-    }
-
-    private Map<String, AllocationNodeDto> buildChildrenForCategory(String category, List<AssetPositionDto> assets, BigDecimal categoryTotal) {
-        if (category.equals("crypto")) {
-            // Para cripto, o próximo nível são os próprios ativos
-            return assets.stream().collect(Collectors.toMap(
-                    AssetPositionDto::getTicker,
-                    asset -> new AllocationNodeDto(
-                            asset.getCurrentValue().divide(categoryTotal, 4, RoundingMode.HALF_UP).multiply(BigDecimal.valueOf(100))
-                    )
-            ));
-        }
-
-        // Para Brasil e EUA, o próximo nível é por tipo de ativo (Ações, ETFs, Renda Fixa)
-        Map<String, List<AssetPositionDto>> byAssetType = assets.stream()
-                .collect(Collectors.groupingBy(asset -> asset.getAssetType().name().toLowerCase()));
-
-        return byAssetType.entrySet().stream()
-                .collect(Collectors.toMap(
-                        Map.Entry::getKey,
-                        entry -> {
-                            String assetTypeKey = entry.getKey();
-                            List<AssetPositionDto> assetTypeAssets = entry.getValue();
-
-                            BigDecimal assetTypeTotal = assetTypeAssets.stream()
-                                    .map(AssetPositionDto::getCurrentValue)
-                                    .reduce(BigDecimal.ZERO, BigDecimal::add);
-
-                            BigDecimal assetTypePercentage = assetTypeTotal.divide(categoryTotal, 4, RoundingMode.HALF_UP).multiply(BigDecimal.valueOf(100));
-
-                            // NÍVEL 3: Construir os filhos para cada tipo de ativo (os tickers individuais)
-                            Map<String, AllocationNodeDto> grandchildren = assetTypeAssets.stream()
-                                    .collect(Collectors.toMap(
-                                            AssetPositionDto::getTicker,
-                                            asset -> new AllocationNodeDto(
-                                                    asset.getCurrentValue().divide(assetTypeTotal, 4, RoundingMode.HALF_UP).multiply(BigDecimal.valueOf(100))
-                                            )
-                                    ));
-
-                            return new AllocationNodeDto(assetTypePercentage, grandchildren);
-                        }
-                ));
-    }
-
-
-
-
-    private String getAssetDisplayCategoryKey(AssetPositionDto asset) {
-        return asset.getAssetType().name().toLowerCase();
-    }
-
-    private String getAssetCategoryKey(AssetPositionDto asset) {
-        // Para Renda Fixa e Cripto, o "mercado" pode ser o próprio tipo para consistência.
-        String market = (asset.getMarket() != null) ? asset.getMarket().name() : asset.getAssetType().name();
-        return asset.getAssetType().name() + "_" + market;
-    }
-
-    public PortfolioSummaryDto getPortfolioSummary() {
-        //get total heritage
-        BigDecimal totalHeritage = BigDecimal.ZERO;
-        BigDecimal totalInvested = BigDecimal.ZERO;
-        BigDecimal profitability;
-
-        for(AssetPositionDto dto : getConsolidatedPortfolio()) {
-            if(dto != null) {
-                totalHeritage = totalHeritage.add(dto.getCurrentValue());
-                totalInvested = totalInvested.add(dto.getTotalInvested());
-            }
-        }
-
-        if (totalInvested.compareTo(BigDecimal.ZERO) <= 0) {
-            return new PortfolioSummaryDto(BigDecimal.ZERO, BigDecimal.ZERO, BigDecimal.ZERO);
-        }
-        profitability = (totalHeritage.subtract(totalInvested)).divide(totalInvested, 4, RoundingMode.HALF_UP).multiply(BigDecimal.valueOf(100));
-
-
-        return new PortfolioSummaryDto(totalHeritage,totalInvested,profitability);
-    }
-
     private record AssetKey(String ticker, AssetType assetType, Market market) {}
-
 }

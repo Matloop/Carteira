@@ -27,6 +27,7 @@ import java.math.BigDecimal;
 import java.math.RoundingMode;
 import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
+import java.time.LocalDate;
 import java.util.List;
 import java.util.Objects;
 
@@ -127,6 +128,11 @@ public class WebScraperService implements MarketDataProvider {
                     }
                 })
                 .then();
+    }
+
+    @Override
+    public Mono<PriceData> fetchHistoricalPrice(AssetToFetch asset, LocalDate date) {
+        return null;
     }
 
     private Mono<PriceData> fetchSingleStockPrice(AssetToFetch asset) {

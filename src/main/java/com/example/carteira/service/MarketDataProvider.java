@@ -7,6 +7,7 @@ import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
 
 import java.math.BigDecimal;
+import java.time.LocalDate;
 import java.util.List;
 
 public interface MarketDataProvider {
@@ -15,4 +16,6 @@ public interface MarketDataProvider {
     boolean supports(AssetType assetType);
 
     Mono<Void> initialize();
+
+    Mono<PriceData> fetchHistoricalPrice(AssetToFetch asset, LocalDate date);
 }
